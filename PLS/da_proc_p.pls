@@ -15,34 +15,74 @@ as
   -- 2007-08-14  bjankovsky  New module
   -- 2008-10-14  bjankovsky  Failover enhanced, remote analysis accelerated
   --                         (source code: http://www.bobjankovsky.org/show.php?seq=4)
-  -- 2020-04-08  zjaeger     Redesign (move dynamic code to static code ...)
+  -- 2020-04-08  zjaeger     Partially redesigned - functionality not yet implemented in origin scope.
+  --                         For the time being: no dblink support, no partitions,
+  --                         Move original dynamic code to static code for better maintenance.
+  -- 2020-07-26  zjaeger     Improve PL/SQL user interface
   ------------------------------------------------------------------------------
 
-  procedure init( p_name             in varchar2,         -- any analysis identifier
-                  p_owner            in varchar2 := null, -- analysed tables schema owner
-                  p_mask_like        in varchar2 := null, -- analysed table names LIKE mask
-                  p_mask_notlike     in varchar2 := null, -- analysed table names NOT LIKE mask
-                  p_mask_regexp_like in varchar2 := null, -- analysed table names REGEXP_LIKE expression
-               -- p_enum_flag        in varchar2 := 'N',
-               -- p_db_link          in varchar2 := null,
-                  p_description      in varchar2 := null ) ;
+  /* -- (1) -- prepare procedures ----------------------------------------------
+   * prepare() procedures creates a new table set. It populates tables:
+   *   - DA_SET - tables set (one record with input parameters)
+   *   - DA_TAB - selected tables (from one selected schema by input parameter p_owner)
+   *   - DA_COL - all columns for selected tables by Oracle data dictionary
+   * (procedure prints a new SET_KEY - primary syntetic key for DA_SET table)
+   * --------------------------------------------------------------------------- */
 
-  procedure del( p_run_key in integer ) ;
+  -- prepare procedure version 1: like expresions for TABLE_NAME
+  procedure prepare( p_name             in varchar2,         -- table set name identifier
+                     p_owner            in varchar2 := null, -- schema owner (current schema if NULL)
+                     p_mask_like        in varchar2 := null, -- table name like expression
+                     p_mask_notlike     in varchar2 := null, -- table name not like expression
+                     p_description      in varchar2 := null  -- table set description
+                   ) ;
 
-  procedure go( p_run_key         in integer,
-                p_tab_regexp_like in varchar2 := null,
-                p_col_regexp_like in varchar2 := null
-              ) ;
+  -- prepare procedure version 2: regexp like expresions for TABLE_NAME
+  procedure prepare( p_name             in varchar2,         -- table set name identifier
+                     p_owner            in varchar2 := null, -- schema owner (current schema if NULL)
+                     p_mask_regexp_like in varchar2 := null, -- table name regexp_like expression
+                     p_description      in varchar2 := null  -- table set description
+                   ) ;
 
-  procedure go_job_start( p_run_key in integer ) ;
-  procedure go_job_stop(  p_run_key in integer ) ;
+  -- returns current DA_SET.set_key (after prepare() procedure call)
+  function get_SET_KEY return integer ;
+
+  -- enable/disable selected tables for run() procedure (set DA_TAB.tab_calc_flag column (Y/N) )
+  procedure tab_enable(  p_set_key         in integer,
+                         p_tab_regexp_like in varchar2 ) ;
+
+  procedure tab_disable( p_set_key         in integer,
+                         p_tab_regexp_like in varchar2 ) ;
+
+  -- reinitialise for selected table set
+  procedure reset( p_set_key         in integer,
+                   p_tab_regexp_like in varchar2 := null ) ;
+
+  -- delete selected table set and all detail tables
+  procedure del( p_set_key in integer ) ;
+
+  /* -- (2) -- run procedures --------------------------------------------------
+   * run() procedure calculates some statistics for selected tables set or its subset
+   * it will do
+   *   - update non static coluns at DA_COL table
+   *   - delete/insert records at DA_COLFACT table
+   * --------------------------------------------------------------------------- */
+
+  -- run domain analysis (calculate some statistics), it could take a long time
+  procedure run( p_set_key         in integer,
+                 p_tab_regexp_like in varchar2 := null,
+                 p_col_regexp_like in varchar2 := null
+               ) ;
+
+  -- start of run domain analysis on backgroud (using DBMS_SCHEDULER)
+  procedure run_job_start( p_set_key in integer ) ;
+  -- stop of run domain analysis on backgroud (using DBMS_SCHEDULER)
+  procedure run_job_stop(  p_set_key in integer ) ;
 
 end DA_PROC_P ;
 /
 
-prompt >>> create package body DA_PROC_P
-
-create or replace package body DA_PROC_P
+CREATE OR REPLACE package body DA_PROC_P
 as
   subtype t_varchar2_max is varchar2(32767) ;
 
@@ -60,13 +100,14 @@ as
   C_COLFACT_LIMIT_2   constant varchar2(2) :=  '6' ;    -- should be C_COLFACT_LIMIT_1 / 2
   C_NL                constant char        := chr(10) ; -- new line character
 
-  g_owner    DA_RUN.run_owner%TYPE ;
-  g_run_key  DA_RUN.run_key%TYPE ;
+  g_owner    DA_SET.set_owner%TYPE ;
+  g_set_key  DA_SET.set_key%TYPE ;
   g_tab_key  DA_TAB.tab_key%TYPE ;
   g_col_key  DA_COL.col_key%TYPE ;
 
-  procedure ins_COL( p_run_key      in integer,
-                     p_tab_ins_date in date := null )
+
+  procedure ins_COL( p_set_key in integer )
+                 --  p_tab_ins_date in date := null )
   as
   begin
     -- insert/update DA_COL (columns)
@@ -77,22 +118,22 @@ as
         X_TAB
         as
           ( select
-              a.RUN_KEY,
+              a.SET_KEY,
               b.TAB_KEY,
-              a.RUN_OWNER       as OWNER,
+              a.SET_OWNER       as OWNER,
               b.TAB_NAME        as TABLE_NAME,
               c.CONSTRAINT_NAME as PK_IND_NAME
             from
-              DA_RUN a
-              inner join DA_TAB b               on ( a.RUN_KEY = b.RUN_KEY
+              DA_SET a
+              inner join DA_TAB b               on ( a.SET_KEY = b.SET_KEY
                                                    )
-              left outer join ALL_CONSTRAINTS c on (     a.RUN_OWNER = c.OWNER
+              left outer join ALL_CONSTRAINTS c on (     a.SET_OWNER = c.OWNER
                                                      and b.TAB_NAME  = c.TABLE_NAME
                                                      and 'P'         = c.CONSTRAINT_TYPE
                                                    )
             where
-              a.RUN_KEY = p_run_key
-              and (p_tab_ins_date is null or b.INSERTED_DATE = p_tab_ins_date)
+              a.SET_KEY = p_set_key
+           -- and (p_tab_ins_date is null or b.INSERTED_DATE = p_tab_ins_date)
           )
         select
           e.TAB_KEY,
@@ -162,8 +203,8 @@ as
   end ins_COL ;
 
 
-  procedure upd_COL_DEFAULT( p_run_key      in integer,
-                             p_tab_ins_date in date := null )
+  procedure upd_COL_DEFAULT( p_set_key in integer )
+                         --  p_tab_ins_date in date := null )
   --
   -- update DA_COL.col_default (column default value if length <= 2000)
   is
@@ -172,17 +213,17 @@ as
         c.COL_KEY,
         d.DATA_DEFAULT -- LONG datatype
       from
-        DA_RUN a
-        inner join DA_TAB b          on ( a.RUN_KEY = b.RUN_KEY )
+        DA_SET a
+        inner join DA_TAB b          on ( a.SET_KEY = b.SET_KEY )
         inner join DA_COL c          on ( b.TAB_KEY = c.TAB_KEY
                                         )
-        inner join ALL_TAB_COLUMNS d on (     a.RUN_OWNER = d.OWNER
+        inner join ALL_TAB_COLUMNS d on (     a.SET_OWNER = d.OWNER
                                           and b.TAB_NAME  = d.TABLE_NAME
                                           and c.COL_NAME  = d.COLUMN_NAME
                                         )
       where
-            a.RUN_KEY = p_run_key
-        and (p_tab_ins_date is null or b.INSERTED_DATE = p_tab_ins_date)
+            a.SET_KEY = p_set_key
+    --  and (p_tab_ins_date is null or b.INSERTED_DATE = p_tab_ins_date)
         and d.DEFAULT_LENGTH is not null
         and d.DEFAULT_LENGTH <= 2000 ;
 
@@ -210,7 +251,7 @@ as
   end upd_COL_DEFAULT ;
 
 
-  procedure ins_TAB( p_run_key in integer )
+  procedure ins_TAB( p_set_key in integer )
   as
     l_current_datetime  DATE := sysdate ;
   begin
@@ -219,89 +260,103 @@ as
       DA_TAB m
     using
       ( select
-          a.RUN_KEY,
+          a.SET_KEY,
           b.TABLE_NAME,
           substr( c.COMMENTS, 1, 2000 ) as TAB_DESC
         from
-          DA_RUN a
-          inner join ALL_TABLES b            on ( a.RUN_OWNER = b.OWNER
+          DA_SET a
+          inner join ALL_TABLES b            on ( a.SET_OWNER = b.OWNER
                                                 )
           left outer join ALL_TAB_COMMENTS c on (     b.OWNER      = c.OWNER
                                                   and b.TABLE_NAME = c.TABLE_NAME
                                                 )
         where
-          a.RUN_KEY = p_run_key
+          a.SET_KEY = p_set_key
           and
-            (     ( a.RUN_MASK_LIKE    is null or b.TABLE_NAME like     a.RUN_MASK_LIKE )
-              and ( a.RUN_MASK_NOTLIKE is null or b.TABLE_NAME not like a.RUN_MASK_NOTLIKE )
-              and ( a.RUN_MASK_REGEXP_LIKE is null or regexp_like( b.TABLE_NAME, a.RUN_MASK_REGEXP_LIKE ) )
+            (     ( a.SET_MASK_LIKE    is null or b.TABLE_NAME like     a.SET_MASK_LIKE )
+              and ( a.SET_MASK_NOTLIKE is null or b.TABLE_NAME not like a.SET_MASK_NOTLIKE )
+              and ( a.SET_MASK_REGEXP_LIKE is null or regexp_like( b.TABLE_NAME, a.SET_MASK_REGEXP_LIKE ) )
+              --- if SET_MASK_REGEXP_LIKE is not null => SET_MASK_LIKE, SET_MASK_NOTLIKE are null (prepare_i())
             )
       ) s
     on
-      (     m.RUN_KEY  = s.RUN_KEY
+      (     m.SET_KEY  = s.SET_KEY
         and m.TAB_NAME = s.TABLE_NAME
       )
     when matched then update set
       m.TAB_DESC     = s.TAB_DESC,
       m.UPDATED_DATE = l_current_datetime
     when not matched then insert(
-      TAB_KEY,
-      RUN_KEY, TAB_NAME, TAB_DESC,
+      TAB_KEY, TAB_CALC_FLAG,
+      SET_KEY, TAB_NAME, TAB_DESC,
       INSERTED_DATE )
     values(
-      da_tab_key_sq.NEXTVAL,
-      s.RUN_KEY, s.TABLE_NAME, s.TAB_DESC,
+      da_tab_key_sq.NEXTVAL,'Y',
+      s.SET_KEY, s.TABLE_NAME, s.TAB_DESC,
       l_current_datetime ) ;
 
     dbms_output.PUT_LINE(to_char(SQL%ROWCOUNT)||' - rows merged into DA_TAB.') ;
 
     -- insert into DA_COL (columns)
-    ins_COL(         p_run_key, l_current_datetime ) ;
+    ins_COL(         p_set_key /*, l_current_datetime*/ ) ;
     -- update DA_COL.data_default (column default value)
-    upd_COL_DEFAULT( p_run_key, l_current_datetime ) ;
+    upd_COL_DEFAULT( p_set_key /*, l_current_datetime*/ ) ;
   end ins_TAB ;
 
 
-  procedure init( p_name             in varchar2,
-                  p_owner            in varchar2 := null,
-                  p_mask_like        in varchar2 := null,
-                  p_mask_notlike     in varchar2 := null,
-                  p_mask_regexp_like in varchar2 := null,
-               -- p_enum_flag        in varchar2 := 'N',
-               -- p_db_link          in varchar2 := null,
-                  p_description      in varchar2 := null )
+  procedure prepare_i( p_name             in varchar2,
+                       p_owner            in varchar2 := null,
+                       p_mask_tp          in varchar2 := null,
+                       p_mask_like        in varchar2 := null,
+                       p_mask_notlike     in varchar2 := null,
+                       p_mask_regexp_like in varchar2 := null,
+                    -- p_enum_flag        in varchar2 := 'N',
+                    -- p_db_link          in varchar2 := null,
+                       p_description      in varchar2 := null )
+  --
+  -- internal prepare procedure (populates tables DA_SET, DA_TAB and DA_COL)
   is
   begin
-    g_owner := nvl( p_owner, USER ) ;
+    g_owner   := nvl( p_owner, USER ) ;
     g_tab_key := null ;
     g_col_key := null ;
 
-    --- insert into DA_RUN
-    insert into DA_RUN(
-      RUN_KEY,
-      RUN_NAME,
-      RUN_OWNER,
-      RUN_MASK_LIKE,
-      RUN_MASK_NOTLIKE,
-      RUN_MASK_REGEXP_LIKE,
-  --  RUN_ENUM_FLAG,
-  --  RUN_DB_LINK,
-      RUN_DESC,
+    --- insert into DA_SET
+    insert into DA_SET(
+      SET_KEY,
+      SET_NAME,
+      SET_OWNER,
+      SET_MASK_TP,
+      SET_MASK_LIKE,
+      SET_MASK_NOTLIKE,
+      SET_MASK_REGEXP_LIKE,
+  --  SET_ENUM_FLAG,
+  --  SET_DB_LINK,
+      SET_DBUSER,
+      SET_OSUSER,
+      SET_DESC,
       INSERTED_DATE )
     values(
-      da_run_key_sq.NEXTVAL,
+      da_set_key_sq.NEXTVAL,
       p_name,
       g_owner,
+      case
+        when p_mask_tp is not null
+        then p_mask_tp
+        else case when p_mask_regexp_like is not null then 'R' else 'L' end
+      end,
       case when p_mask_regexp_like is null then p_mask_like    end,
       case when p_mask_regexp_like is null then p_mask_notlike end,
       p_mask_regexp_like,
    -- nvl( p_enum_flag,'N'),
    -- p_db_link,
+      sys_context('USERENV','SESSION_USER'),
+      sys_context('USERENV','OS_USER'),
       p_description,
       sysdate )
-    returning RUN_KEY into g_run_key ;
+    returning SET_KEY into g_set_key ;
 
-    dbms_output.PUT_LINE('>> da_run.RUN_KEY = '||to_char( g_run_key )) ;
+    dbms_output.PUT_LINE('>> da_set.SET_KEY = '||to_char( g_set_key )) ;
 
     -- print warnings
     if p_mask_regexp_like is not null then
@@ -314,31 +369,186 @@ as
     end if ;
 
     -- insert into DA_TAB (tables) and DA_COLS (columns)
-    ins_TAB( g_run_key ) ;
+    ins_TAB( g_set_key ) ;
     commit ;
-  end init ;
+    dbms_output.PUT_LINE('>> commited') ;
+  end prepare_i ;
 
 
-  procedure del( p_run_key in integer )
-  -- delete DA_RUN and all detail tables
+  procedure prepare( p_name             in varchar2,
+                     p_owner            in varchar2 := null,
+                     p_mask_like        in varchar2 := null,
+                     p_mask_notlike     in varchar2 := null,
+                ---- p_mask_regexp_like in varchar2 := null,
+                  -- p_enum_flag        in varchar2 := 'N',
+                  -- p_db_link          in varchar2 := null,
+                     p_description      in varchar2 := null )
+  --
+  -- prepare() version 1: like expresions
   is
-    l_run_name  DA_RUN.run_name%TYPE ;
+  begin
+    prepare_i( p_name             => p_name,
+               p_owner            => p_owner,
+               p_mask_tp          => 'L', -- table name like expressions
+               p_mask_like        => p_mask_like,
+               p_mask_notlike     => p_mask_notlike,
+          ---- p_mask_regexp_like => p_mask_regexp_like,
+            -- p_enum_flag        => p_enum_flg,
+            -- p_db_link          => p_db_link,
+               p_description      => p_description ) ;
+  end prepare ;
+
+
+  procedure prepare( p_name             in varchar2,
+                     p_owner            in varchar2 := null,
+                ---- p_mask_like        in varchar2 := null,
+                ---- p_mask_notlike     in varchar2 := null,
+                     p_mask_regexp_like in varchar2 := null,
+                  -- p_enum_flag        in varchar2 := 'N',
+                  -- p_db_link          in varchar2 := null,
+                     p_description      in varchar2 := null )
+  --
+  -- prepare() version 2: regexp like expresion
+  is
+  begin
+    prepare_i( p_name             => p_name,
+               p_owner            => p_owner,
+               p_mask_tp          => 'R', -- table name regexp like expressions
+          ---- p_mask_like        => p_mask_like,
+          ---- p_mask_notlike     => p_mask_notlike,
+               p_mask_regexp_like => p_mask_regexp_like,
+            -- p_enum_flag        => p_enum_flg,
+            -- p_db_link          => p_db_link,
+               p_description      => p_description ) ;
+  end prepare ;
+
+
+  function get_SET_KEY return integer
+  is
+  begin
+    return g_set_key ;
+  end get_SET_KEY ;
+
+
+  procedure tab_calc_flag_UPD( p_set_key         in integer,
+                               p_tab_regexp_like in varchar2,
+                               p_calc_flag       in varchar2 )
+  is
+  begin
+    update DA_TAB
+    set
+      TAB_CALC_FLAG = p_calc_flag,
+      UPDATED_DATE  = sysdate
+    where
+      SET_KEY = p_set_key
+      and ( TAB_CALC_FLAG is null or TAB_CALC_FLAG != p_calc_flag )
+      and regexp_like( TAB_NAME, p_tab_regexp_like ) ;
+
+    dbms_output.PUT_LINE(to_char(SQL%ROWCOUNT)||' - rows DA_TAB updated for SET_KEY='||to_char(p_set_key)||
+                         ', tab: '''||p_tab_regexp_like||''', flag='|| p_calc_flag ) ;
+  end tab_calc_flag_UPD ;
+
+
+  procedure tab_enable( p_set_key         in integer,
+                        p_tab_regexp_like in varchar2 )
+  is
+  begin
+    tab_calc_flag_UPD( p_set_key, p_tab_regexp_like,'Y') ;
+  end tab_enable ;
+
+
+  procedure tab_disable( p_set_key         in integer,
+                         p_tab_regexp_like in varchar2 )
+  is
+  begin
+    tab_calc_flag_UPD( p_set_key, p_tab_regexp_like,'N') ;
+  end tab_disable ;
+
+
+  procedure reset( p_set_key         in integer,
+                   p_tab_regexp_like in varchar2 := null )
+  is
+  begin
+    -- delete from DA_COLFACT:
+    delete from DA_COLFACT
+    where
+      COL_KEY in
+      ( select a.COL_KEY
+        from
+          DA_COL a
+          inner join DA_TAB b on ( a.TAB_KEY = b.TAB_KEY )
+        where
+          b.SET_KEY = p_set_key
+          and (p_tab_regexp_like is null or regexp_like( b.TAB_NAME, p_tab_regexp_like ) )
+      ) ;
+    dbms_output.PUT_LINE( to_char(SQL%ROWCOUNT)||' - rows deleted at DA_COLFACT.') ;
+
+    -- delete from DA_LOG
+    if p_tab_regexp_like is null then
+      delete from DA_LOG where SET_KEY = p_set_key ;
+    else
+      delete from DA_LOG
+      where
+        SET_KEY = p_set_key
+        and TAB_KEY in ( select a.TAB_KEY
+                         from   DA_TAB a
+                         where  a.SET_KEY = p_set_key
+                                and regexp_like( a.TAB_NAME, p_tab_regexp_like )
+                       ) ;
+    end if ;
+    dbms_output.PUT_LINE( to_char(SQL%ROWCOUNT)||' - rows deleted at DA_LOG.') ;
+
+    update DA_COL
+    set
+      COL_CNT_ALL        = null,
+      COL_CNT_DISTINCT   = null,
+      COL_CNT_NO_DEFAULT = null,
+      COL_LEN_MIN        = null,
+      COL_LEN_MAX        = null,
+      UPDATED_DATE       = null
+    where
+      TAB_KEY in ( select a.TAB_KEY
+                   from   DA_TAB a
+                   where
+                     a.SET_KEY = p_set_key
+                     and (p_tab_regexp_like is null or regexp_like( a.TAB_NAME, p_tab_regexp_like ) )
+                 ) ;
+    dbms_output.PUT_LINE( to_char(SQL%ROWCOUNT)||' - rows updated at DA_COL.') ;
+
+    update DA_TAB
+    set
+      TAB_NUM_ROWS        = null,
+      TAB_CALC_TIME_START = null,
+      TAB_CALC_TIME_END   = null
+    where
+      SET_KEY = p_set_key
+      and (p_tab_regexp_like is null or regexp_like( TAB_NAME, p_tab_regexp_like ) ) ;
+
+    dbms_output.PUT_LINE( to_char(SQL%ROWCOUNT)||' - rows updated at DA_TAB.') ;
+
+  end reset ;
+
+
+  procedure del( p_set_key in integer )
+  -- delete DA_SET and all detail tables
+  is
+    l_SET_name  DA_SET.SET_name%TYPE ;
   begin
     begin
-      select a.RUN_NAME into l_run_name from DA_RUN a where a.RUN_KEY = p_run_key ;
+      select a.SET_NAME into l_SET_name from DA_SET a where a.SET_KEY = p_set_key ;
     exception
       when NO_DATA_FOUND then
-        dbms_output.PUT_LINE('No data found for RUN_KEY = '||nvl( to_char(p_run_key),'null')||'.') ;
+        dbms_output.PUT_LINE('No data found for SET_KEY = '||nvl( to_char(p_set_key),'null')||'.') ;
     end ;
 
-    if l_run_name is not null then
+    if l_SET_name is not null then
       -- delete from DA_LOG
-      delete from DA_LOG where RUN_KEY = p_run_key ;
-      dbms_output.PUT_LINE( to_char(SQL%ROWCOUNT)||' - rows deleted at DA_LOG (run_key).') ;
+      delete from DA_LOG where SET_KEY = p_set_key ;
+      dbms_output.PUT_LINE( to_char(SQL%ROWCOUNT)||' - rows deleted at DA_LOG (SET_key).') ;
 /* -- delete from DA_LOG
       where
         TAB_KEY in
-        ( select a.TAB_KEY from DA_TAB a where a.RUN_KEY = p_run_key
+        ( select a.TAB_KEY from DA_TAB a where a.SET_KEY = p_set_key
         ) ;
       dbms_output.PUT_LINE( to_char(SQL%ROWCOUNT)||' - rows deleted at DA_LOG (tab_key).') ;
 
@@ -350,7 +560,7 @@ as
             DA_COL a
             inner join DA_TAB b on ( a.TAB_KEY = b.TAB_KEY )
           where
-            b.RUN_KEY = p_run_key
+            b.SET_KEY = p_set_key
         ) ;
       dbms_output.PUT_LINE( to_char(SQL%ROWCOUNT)||' - rows deleted at DA_LOG (col_key).') ; -- */
 
@@ -363,7 +573,7 @@ as
             DA_COL a
             inner join DA_TAB b on ( a.TAB_KEY = b.TAB_KEY )
           where
-            b.RUN_KEY = p_run_key
+            b.SET_KEY = p_set_key
         ) ;
       dbms_output.PUT_LINE( to_char(SQL%ROWCOUNT)||' - rows deleted at DA_COLFACT.') ;
       -- delete from DA_COL:
@@ -372,15 +582,15 @@ as
         TAB_KEY in
         ( select a.TAB_KEY
           from   DA_TAB a
-          where  a.RUN_KEY = p_run_key
+          where  a.SET_KEY = p_set_key
         ) ;
       dbms_output.PUT_LINE( to_char(SQL%ROWCOUNT)||' - rows deleted at DA_COL.') ;
       -- delete from DA_TAB:
-      delete from DA_TAB where RUN_KEY = p_run_key ;
+      delete from DA_TAB where SET_KEY = p_set_key ;
       dbms_output.PUT_LINE( to_char(SQL%ROWCOUNT)||' - rows deleted at DA_TAB.') ;
-      -- delete from DA_RUN:
-      delete from DA_RUN where RUN_KEY = p_run_key ;
-      dbms_output.PUT_LINE( to_char(SQL%ROWCOUNT)||' - rows deleted at DA_RUN.') ;
+      -- delete from DA_SET:
+      delete from DA_SET where SET_KEY = p_set_key ;
+      dbms_output.PUT_LINE( to_char(SQL%ROWCOUNT)||' - rows deleted at DA_SET.') ;
     end if ;
 
   end del ;
@@ -393,9 +603,9 @@ as
     pragma autonomous_transaction ;
   begin
     insert into DA_LOG(
-      LOG_TIME, LOG_TYPE, LOG_MSG, LOG_STACK, RUN_KEY, TAB_KEY, COL_KEY )
+      LOG_TIME, LOG_TYPE, LOG_MSG, LOG_STACK, SET_KEY, TAB_KEY, COL_KEY )
     values(
-      sysdate, p_type, p_msg, p_clob, g_run_key, g_tab_key, g_col_key ) ;
+      sysdate, p_type, p_msg, p_clob, g_set_key, g_tab_key, g_col_key ) ;
     commit ;
   exception
     when OTHERS then
@@ -420,9 +630,10 @@ as
                            pa_query_text    in out varchar2,
                            pa_query_cols    in out pls_integer )
   is
-    l_col_type   DA_COL.col_data_type2%TYPE ;
-    l_col_name   ALL_TAB_COLUMNS.column_name%TYPE ;
-    l_col_expr   varchar2(256) ;
+    l_col_type     DA_COL.col_data_type2%TYPE ;
+    l_col_name     ALL_TAB_COLUMNS.column_name%TYPE ;
+    l_col_expr     varchar2(256) ;
+    l_col_default  DA_COL.col_default%TYPE ;
   begin
     pa_query_text := 'select' ;
     for i in 1..p_col_name_TA.COUNT
@@ -444,9 +655,19 @@ as
         end if ;
       elsif p_fce = 3 then -- no default count ---------------------------------
         if p_col_default_TA(i) is null or l_col_type = 'B' then
+          l_col_default := null ;
+        else
+          l_col_default := trim( p_col_default_TA(i) ) ;
+          if l_col_type = 'N' -- number
+             and substr( l_col_default,1,1 ) = ''''
+          then
+            l_col_default := substr( l_col_default, 2, length( l_col_default ) - 2 ) ;
+          end if ;
+        end if ;
+        if l_col_default is null then
           l_col_expr := 'cast(null as number(2))' ;
         else
-          l_col_expr := 'count(nullif(a.'|| l_col_name ||','|| p_col_default_TA(i) ||'))' ;
+          l_col_expr := 'count(nullif(a.'|| l_col_name ||','|| l_col_default ||'))' ;
         end if ;
       elsif p_fce = 4 then -- char length (min,max) ----------------------------
         if l_col_type != 'C' then
@@ -477,7 +698,7 @@ as
   end gen_tab_query ;
 
 
-  procedure run_query( p_query_text  in     varchar2,
+  procedure SET_query( p_query_text  in     varchar2,
                        p_query_cols  in     pls_integer,
                        p_col_name_TA in     t_TA_col_name,
                        pa_col_cnt_TA in out t_TA_col_cnt,
@@ -514,10 +735,10 @@ as
            p_msg  => SQLERRM,
            p_clob => p_query_text ) ;
       raise ;
-  end run_query ;
+  end SET_query ;
 
 
-  procedure run_query2( p_query_text   in     varchar2,
+  procedure SET_query2( p_query_text   in     varchar2,
                         p_query_cols   in     pls_integer,
                         p_col_name_TA  in     t_TA_col_name,
                         pa_col_len1_TA in out t_TA_col_len,  -- odd cols
@@ -560,7 +781,7 @@ as
            p_msg  => SQLERRM,
            p_clob => p_query_text ) ;
       raise ;
-  end run_query2 ;
+  end SET_query2 ;
 
 
   function sp( p_len in integer ) return varchar2
@@ -584,8 +805,6 @@ as
     l_col_expr_1  varchar2(32) ;
     l_col_expr_2  varchar2(64) ;
   begin
-    g_col_key := p_col_key ;
-
     l_col_expr_1 := 'a.'||p_col_name ;
     if p_col_type2 = 'C' and p_col_len_db > C_COLFACT_VALUE_MAX then
       l_col_expr_2 := 'substr('||l_col_expr_1||',1,'||to_number( C_COLFACT_VALUE_MAX-3)||')||''...''' ;
@@ -650,7 +869,6 @@ sp(2)||'or b.ORD > (b.CNT_ALL -'|| C_COLFACT_LIMIT_1 ||')' ;
         log('E', SQLERRM, pa_query_text ) ;
         raise ;
     end ;
-    g_col_key := null ;
 
   end colfact_insert ;
 
@@ -678,7 +896,6 @@ sp(2)||'or b.ORD > (b.CNT_ALL -'|| C_COLFACT_LIMIT_1 ||')' ;
     l_query_text            t_varchar2_max ;
     l_query_cols            pls_integer ;
     l_cnt_all               DA_TAB.tab_num_rows%TYPE ;
-    l_calc_time_start       date := sysdate ;
 
     function col_default_NOT_NUL_exists( p_col_default_TA in t_TA_col_default ) return boolean
     is
@@ -724,6 +941,9 @@ sp(2)||'or b.ORD > (b.CNT_ALL -'|| C_COLFACT_LIMIT_1 ||')' ;
 
     -- generate and run queries
     if l_col_key_TA.COUNT > 0 then
+      -- delete from DA_COLFACT
+      delete from DA_COLFACT where COL_KEY in (select COL_KEY from DA_COL where TAB_KEY = p_tab_key) ;
+
       -- 1: count
       gen_tab_query( p_table_name     => p_tab_name,
                      p_col_name_TA    => l_col_name_TA,
@@ -733,67 +953,71 @@ sp(2)||'or b.ORD > (b.CNT_ALL -'|| C_COLFACT_LIMIT_1 ||')' ;
                      pa_query_text    => l_query_text,
                      pa_query_cols    => l_query_cols ) ;
 
-      run_query( p_query_text  => l_query_text,
+      SET_query( p_query_text  => l_query_text,
                  p_query_cols  => l_query_cols,
                  p_col_name_TA => l_col_name_TA,
                  pa_col_cnt_TA => l_col_cnt_all_TA,
-                 pa_cnt_all    => l_cnt_all ) ;
-
-      -- 2: count distinct
-      gen_tab_query( p_table_name     => p_tab_name,
-                     p_col_name_TA    => l_col_name_TA,
-                     p_col_type2_TA   => l_col_type2_TA,
-                     p_col_default_TA => l_col_default_TA, -- not used for fce=2
-                     p_fce            => 2, -- count distinct
-                     pa_query_text    => l_query_text,
-                     pa_query_cols    => l_query_cols ) ;
-
-      run_query( p_query_text  => l_query_text,
-                 p_query_cols  => l_query_cols,
-                 p_col_name_TA => l_col_name_TA,
-                 pa_col_cnt_TA => l_col_cnt_distinct_TA,
-                 pa_cnt_all    => l_cnt_all -- not used for fce=2
+                 pa_cnt_all    => l_cnt_all         -- tab_num_rows
                ) ;
 
-      if col_default_NOT_NUL_exists( l_col_default_TA ) then
-        -- 3: no default count
+      if l_cnt_all > 0 then
+        -- 2: count distinct
         gen_tab_query( p_table_name     => p_tab_name,
                        p_col_name_TA    => l_col_name_TA,
                        p_col_type2_TA   => l_col_type2_TA,
-                       p_col_default_TA => l_col_default_TA,
-                       p_fce            => 3, -- no default count
+                       p_col_default_TA => l_col_default_TA, -- not used for fce=2
+                       p_fce            => 2, -- count distinct
                        pa_query_text    => l_query_text,
                        pa_query_cols    => l_query_cols ) ;
 
-        run_query( p_query_text  => l_query_text,
+        SET_query( p_query_text  => l_query_text,
                    p_query_cols  => l_query_cols,
                    p_col_name_TA => l_col_name_TA,
-                   pa_col_cnt_TA => l_col_cnt_no_default_TA,
-                   pa_cnt_all    => l_cnt_all -- not used for fce=3
+                   pa_col_cnt_TA => l_col_cnt_distinct_TA,
+                   pa_cnt_all    => l_cnt_all -- not used for fce=2
                  ) ;
-      end if ;
 
-      if col_type2_CHAR_exists( l_col_type2_TA ) then
-        -- 4: character columns length, min/max
-        gen_tab_query( p_table_name     => p_tab_name,
-                       p_col_name_TA    => l_col_name_TA,
-                       p_col_type2_TA   => l_col_type2_TA,
-                       p_col_default_TA => l_col_default_TA,
-                       p_fce            => 4, -- character columns length, min/max
-                       pa_query_text    => l_query_text,
-                       pa_query_cols    => l_query_cols ) ;
+        if col_default_NOT_NUL_exists( l_col_default_TA ) then
+          -- 3: no default count
+          gen_tab_query( p_table_name     => p_tab_name,
+                         p_col_name_TA    => l_col_name_TA,
+                         p_col_type2_TA   => l_col_type2_TA,
+                         p_col_default_TA => l_col_default_TA,
+                         p_fce            => 3, -- no default count
+                         pa_query_text    => l_query_text,
+                         pa_query_cols    => l_query_cols ) ;
 
-        run_query2( p_query_text   => l_query_text,
-                    p_query_cols   => l_query_cols,
-                    p_col_name_TA  => l_col_name_TA,
-                    pa_col_len1_TA => l_col_len_min_TA, -- min length
-                    pa_col_len2_TA => l_col_len_max_TA  -- max length
-                  ) ;
+          SET_query( p_query_text  => l_query_text,
+                     p_query_cols  => l_query_cols,
+                     p_col_name_TA => l_col_name_TA,
+                     pa_col_cnt_TA => l_col_cnt_no_default_TA,
+                     pa_cnt_all    => l_cnt_all -- not used for fce=3
+                   ) ;
+        end if ;
+
+        if col_type2_CHAR_exists( l_col_type2_TA ) then
+          -- 4: character columns length, min/max
+          gen_tab_query( p_table_name     => p_tab_name,
+                         p_col_name_TA    => l_col_name_TA,
+                         p_col_type2_TA   => l_col_type2_TA,
+                         p_col_default_TA => l_col_default_TA,
+                         p_fce            => 4, -- character columns length, min/max
+                         pa_query_text    => l_query_text,
+                         pa_query_cols    => l_query_cols ) ;
+
+          SET_query2( p_query_text   => l_query_text,
+                      p_query_cols   => l_query_cols,
+                      p_col_name_TA  => l_col_name_TA,
+                      pa_col_len1_TA => l_col_len_min_TA, -- min length
+                      pa_col_len2_TA => l_col_len_max_TA  -- max length
+                    ) ;
+        end if ;
       end if ;
 
       -- update DA_COL
       forall i in 1..l_col_key_TA.COUNT
-        update DA_COL set
+        update DA_COL
+        set
           COL_CNT_ALL        = l_col_cnt_all_TA(i),
           COL_CNT_DISTINCT   = l_col_cnt_distinct_TA(i),
           COL_CNT_NO_DEFAULT = l_col_cnt_no_default_TA(i),
@@ -803,41 +1027,45 @@ sp(2)||'or b.ORD > (b.CNT_ALL -'|| C_COLFACT_LIMIT_1 ||')' ;
         where
           COL_KEY = l_col_key_TA( i ) ;
 
-      -- delete/insert DA_COLFACT
-      for i in 1..l_col_key_TA.COUNT
-      loop
-        if l_col_type2_TA(i) != 'B' then
-          delete from DA_COLFACT where COL_KEY = l_col_key_TA(i) ;
-          if l_col_cnt_all_TA(i) > 0 then
-            colfact_insert( p_col_key     => l_col_key_TA(i),
-                            p_tab_name    => p_tab_name,
-                            p_col_name    => l_col_name_TA(i),
-                            p_col_type2   => l_col_type2_TA(i),
-                            p_col_len_db  => l_col_len_db_TA(i),
-                            p_col_metric  => 'V', -- value
-                            pa_query_text => l_query_text ) ;
+      if l_cnt_all > 0 then
+        -- delete/insert DA_COLFACT
+        for i in 1..l_col_key_TA.COUNT
+        loop
+          if l_col_type2_TA(i) != 'B' then
+            if l_col_cnt_all_TA(i) > 0 then
+              g_col_key := l_col_key_TA(i) ;
+              colfact_insert( p_col_key     => l_col_key_TA(i),
+                              p_tab_name    => p_tab_name,
+                              p_col_name    => l_col_name_TA(i),
+                              p_col_type2   => l_col_type2_TA(i),
+                              p_col_len_db  => l_col_len_db_TA(i),
+                              p_col_metric  => 'V', -- value
+                              pa_query_text => l_query_text ) ;
 
-            colfact_insert( p_col_key     => l_col_key_TA(i),
-                            p_tab_name    => p_tab_name,
-                            p_col_name    => l_col_name_TA(i),
-                            p_col_type2   => l_col_type2_TA(i),
-                            p_col_len_db  => l_col_len_db_TA(i),
-                            p_col_metric  => 'F', -- frequency
-                            pa_query_text => l_query_text ) ;
+              if     l_col_cnt_distinct_TA(i) > 1
+                 and l_col_cnt_distinct_TA(i) < l_col_cnt_all_TA(i)
+              then
+                colfact_insert( p_col_key     => l_col_key_TA(i),
+                                p_tab_name    => p_tab_name,
+                                p_col_name    => l_col_name_TA(i),
+                                p_col_type2   => l_col_type2_TA(i),
+                                p_col_len_db  => l_col_len_db_TA(i),
+                                p_col_metric  => 'F', -- frequency
+                                pa_query_text => l_query_text ) ;
+              end if ;
+            end if ;
           end if ;
-        end if ;
-      end loop ;
+        end loop ;
+        g_col_key := null ;
+      end if ;
 
       -- update DA_TAB
       update DA_TAB
       set
-        TAB_NUM_ROWS        = l_cnt_all,
-        TAB_CALC_TIME_START = l_calc_time_start,
-        TAB_CALC_TIME_END   = sysdate
+        TAB_NUM_ROWS      = l_cnt_all,
+        TAB_CALC_TIME_END = sysdate
       where
         TAB_KEY = p_tab_key ;
-
-      commit ;
 
   /*  dbms_output.PUT_LINE('cnt_all = '||to_char(l_cnt_all)) ;
       for i in 1..l_col_name_TA.COUNT
@@ -851,87 +1079,101 @@ sp(2)||'or b.ORD > (b.CNT_ALL -'|| C_COLFACT_LIMIT_1 ||')' ;
   end col_calc ;
 
 
-  procedure go( p_run_key         in integer,
-                p_tab_regexp_like in varchar2 := null,
-                p_col_regexp_like in varchar2 := null )
+  procedure run( p_set_key         in integer,
+                 p_tab_regexp_like in varchar2 := null,
+                 p_col_regexp_like in varchar2 := null )
   is
     cursor c_tab is
       select a.TAB_KEY
       from
         DA_TAB a
       where
-        a.RUN_KEY = p_run_key
+        a.SET_KEY = p_set_key
         and (p_tab_regexp_like is null or regexp_like( a.TAB_NAME, p_tab_regexp_like ) )
+        and a.TAB_CALC_TIME_END is null
+        and a.TAB_CALC_FLAG = 'Y'
       order by
         a.TAB_NAME ;
-    
+
     l_tab_key_TA  t_TA_tab_key ;
     l_tab_name    DA_TAB.tab_name%TYPE ;
   begin
-    select a.RUN_KEY, a.RUN_OWNER into g_run_key, g_owner
-    from   DA_RUN a
-    where  a.RUN_KEY = p_run_key ;
+    select a.SET_KEY, a.SET_OWNER into g_set_key, g_owner
+    from   DA_SET a
+    where  a.SET_KEY = p_set_key ;
 
     open c_tab ; fetch c_tab bulk collect into l_tab_key_TA ; close c_tab ;
 
     for i in 1..l_tab_key_TA.COUNT
     loop
       g_tab_key := l_tab_key_TA( i ) ;
-      select a.TAB_NAME into l_tab_name from DA_TAB a where a.TAB_KEY = g_tab_key ;
+
+      -- set CALC_TIME_START
+      update DA_TAB
+      set
+        TAB_CALC_TIME_START = sysdate,
+        TAB_CALC_TIME_END   = null
+      where
+        TAB_KEY = g_tab_key ;
+      commit ;
+
+      -- get TAB_NAME for TAB_KEY and record lock
+      select a.TAB_NAME into l_tab_name from DA_TAB a where a.TAB_KEY = g_tab_key
+      for update ;
 
       dbms_output.PUT_LINE('>> '||l_tab_name ) ;
       col_calc( g_tab_key, l_tab_name, p_col_regexp_like ) ;
     end loop ;
-  end go ;
+    commit ;
+  end run ;
 
 
-  function get_job_name( p_run_key in integer ) return varchar2
+  function get_job_name( p_set_key in integer ) return varchar2
   is
-    l_run_key  DA_RUN.run_key%TYPE ;
+    l_SET_key  DA_SET.SET_key%TYPE ;
   begin
-    -- existence test for p_run_key only.
-    select a.RUN_KEY into l_run_key from DA_RUN a where a.RUN_KEY = p_run_key ;
+    -- existence test for p_set_key only.
+    select a.SET_KEY into l_SET_key from DA_SET a where a.SET_KEY = p_set_key ;
 
     -- return job_name
-    return 'DOM_AN_'||to_char( p_run_key ) ;
+    return 'DOM_AN_'||to_char( p_set_key ) ;
   exception
     when NO_DATA_FOUND then
-      dbms_output.PUT_LINE('Unknown RUN_KEY = '||nvl( to_char(p_run_key),'null')||'.') ;
+      dbms_output.PUT_LINE('Unknown SET_KEY = '||nvl( to_char(p_set_key),'null')||'.') ;
       return null ;
 
   end get_job_name ;
 
 
-  procedure go_job_start( p_run_key in integer )
+  procedure run_job_start( p_set_key in integer )
   is
     l_job_name  varchar2(30) ;
   begin
-    l_job_name := get_job_name( p_run_key ) ;
+    l_job_name := get_job_name( p_set_key ) ;
     if l_job_name is not null then
 
       DBMS_SCHEDULER.create_job(
         job_name   =>  l_job_name,
         job_type   => 'PLSQL_BLOCK',
-        job_action => 'begin da_proc_p.GO('|| to_char(p_run_key) ||') ; end ;',
+        job_action => 'begin da_proc_p.run('|| to_char(p_set_key) ||') ; end ;',
         enabled    =>  TRUE,
-        comments   => 'Domain Analysis (DA_RUN.run_key='|| to_char(p_run_key) ||').'
+        comments   => 'Domain Analysis (DA_SET.SET_key='|| to_char(p_set_key) ||').'
         ) ;
-
       dbms_output.PUT_LINE('Job '||l_job_name||' created.') ;
     end if ;
-  end go_job_start ;
+  end run_job_start ;
 
 
-  procedure go_job_stop( p_run_key in integer )
+  procedure run_job_stop( p_set_key in integer )
   is
     l_job_name  varchar2(30) ;
   begin
-    l_job_name := get_job_name( p_run_key ) ;
+    l_job_name := get_job_name( p_set_key ) ;
     if l_job_name is not null then
       DBMS_SCHEDULER.stop_job( l_job_name ) ;
       dbms_output.PUT_LINE('Job '||l_job_name||' stopped.') ;
     end if ;
-  end go_job_stop ;
+  end run_job_stop ;
 
 end DA_PROC_P ;
 /

@@ -30,8 +30,8 @@ as
       or j.COLFACT_ORDER = j.COLFACT_ORDER_MAX -- the last  (maximum)
   )
 select
-  a.RUN_KEY,
-  a.RUN_OWNER as OWNER,
+  a.SET_KEY,
+  a.SET_OWNER as OWNER,
   b.TAB_NAME,
   c.COL_KEY,
   c.COL_SEQNO,
@@ -55,8 +55,8 @@ select
   g.COLFACT_VALUE as FREQ_MAX_VAL, -- most frequent
   g.COLFACT_COUNT as FREQ_MAX_CNT
 from
-  DA_RUN a
-  inner join DA_TAB b        on ( a.RUN_KEY  = b.RUN_KEY )
+  DA_SET a
+  inner join DA_TAB b        on ( a.SET_KEY  = b.SET_KEY )
   inner join DA_COL c        on ( b.TAB_KEY  = c.TAB_KEY
                                 )
   left outer join X_VALUES d on ( c.COL_KEY  = d.COL_KEY
@@ -76,7 +76,7 @@ from
                                   and  -1    = g.COLFACT_ORDER_DESC
                                 )
 order by
-  a.RUN_KEY,
+  a.SET_KEY,
   b.TAB_NAME,
   c.COL_SEQNO
 /

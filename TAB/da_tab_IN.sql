@@ -11,8 +11,8 @@ tablespace &TABSP_NAME
 prompt >>> alter table DA_TAB add constraint DA_TAB_UK
 
 alter table DA_TAB add
-constraint DA_TAB_UK unique ( RUN_KEY, TAB_NAME )
--- constraint DA_TAB_UK unique ( RUN_KEY, TAB_NAME, TAB_OWNER )
+constraint DA_TAB_UK unique ( SET_KEY, TAB_NAME )
+-- constraint DA_TAB_UK unique ( SET_KEY, TAB_NAME, TAB_OWNER )
 using index
 tablespace &TABSP_NAME
 /

@@ -4,9 +4,10 @@ prompt >>> create table DA_TAB(
 
 create table DA_TAB(
   tab_key                         NUMBER(12)           NOT NULL,
-  run_key                         NUMBER(12)           NOT NULL,
+  set_key                         NUMBER(12)           NOT NULL,
   tab_par_key                     NUMBER(12)           NULL,
 --tab_owner                       VARCHAR2(30)         NOT NULL,
+  tab_calc_flag                   CHAR(1)              NULL,
   tab_name                        VARCHAR2(30)         NOT NULL,
 --tab_partition                   VARCHAR2(30)         NULL,
 --tab_partitioning_condition      VARCHAR2(2000)       NULL,
@@ -25,8 +26,8 @@ tablespace &TABSP_NAME
 comment on table DA_TAB is
 'Anayzed table'
 /
-comment on column DA_TAB.RUN_KEY is
-'RUN foreign key'
+comment on column DA_TAB.SET_KEY is
+'Foreign key to DA_SET.set_key'
 /
 comment on column DA_TAB.TAB_CHILD_COUNT is
 'Number of child tables'

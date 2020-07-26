@@ -2,11 +2,11 @@
 --
 -- Foreign key constraints
 
-prompt >>> alter table DA_TAB add constraint DA_TAB_RUN_FK
+prompt >>> alter table DA_TAB add constraint DA_TAB_SET_FK
 
 alter table DA_TAB add
-constraint DA_TAB_RUN_FK foreign key (RUN_KEY)
-references DA_RUN (RUN_KEY) on delete cascade
+constraint DA_TAB_SET_FK foreign key (SET_KEY)
+references DA_SET (SET_KEY) on delete cascade
 /
 
 prompt >>> alter table DA_COL add constraint DA_COL_TAB_FK
