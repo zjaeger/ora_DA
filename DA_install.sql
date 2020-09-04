@@ -69,7 +69,8 @@ set feedback off
 
 -- create tables
 
-define TABSP_NAME = USERS
+-- define TABSP_NAME = USERS
+define TABSP_NAME = SYM_DATA
 
 @TAB/da_log_TA.sql
 @TAB/da_set_TA.sql
@@ -79,7 +80,8 @@ define TABSP_NAME = USERS
 
 -- create indexes
 
-define TABSP_NAME = USERS
+-- define TABSP_NAME = USERS
+define TABSP_NAME = SYM_IND
 
 -- @da_log_IN.sql
 @TAB/da_set_IN.sql
@@ -95,6 +97,7 @@ define TABSP_NAME = USERS
 
 -- create views
 @VIEW/da_out1_v_VW.sql
+@VIEW/da_tab_run_v_VW.sql
 
 -- PL/SQL package
 @PLS/da_proc_p.pls
