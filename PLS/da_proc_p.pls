@@ -19,6 +19,7 @@ as
   --                         For the time being: no dblink support, no partitions,
   --                         Move original dynamic code to static code for better maintenance.
   -- 2020-07-26  zjaeger     Improve PL/SQL user interface
+  -- 2020-09-14  zjaeger     COL_DATA_TYPE2 derived from the first word of ALL_TAB_COLUMNS.data_type
   ------------------------------------------------------------------------------
 
   /* -- (1) -- prepare procedures ----------------------------------------------
@@ -30,7 +31,7 @@ as
    * --------------------------------------------------------------------------- */
 
   -- prepare procedure version 1: like expresions for TABLE_NAME
-  procedure prepare( p_name             in varchar2,         -- table set name identifier
+  procedure prepare( p_set_name         in varchar2,         -- table set name identifier
                      p_owner            in varchar2 := null, -- schema owner (current schema if NULL)
                      p_mask_like        in varchar2 := null, -- table name like expression
                      p_mask_notlike     in varchar2 := null, -- table name not like expression
@@ -38,20 +39,24 @@ as
                    ) ;
 
   -- prepare procedure version 2: regexp like expresions for TABLE_NAME
-  procedure prepare( p_name             in varchar2,         -- table set name identifier
+  procedure prepare( p_set_name         in varchar2,         -- table set name identifier
                      p_owner            in varchar2 := null, -- schema owner (current schema if NULL)
                      p_mask_regexp_like in varchar2 := null, -- table name regexp_like expression
                      p_description      in varchar2 := null  -- table set description
                    ) ;
 
-  -- returns current DA_SET.set_key (after prepare() procedure call)
-  function get_SET_KEY return integer ;
+  -- returns current DA_SET.set_key (after prepare() procedure call) or DA_SET.set_key for p_set_name
+  function get_SET_KEY( p_set_name in varchar2 := null ) return integer ;
 
   -- enable/disable selected tables for run() procedure (set DA_TAB.tab_calc_flag column (Y/N) )
   procedure tab_enable(  p_set_key         in integer,
                          p_tab_regexp_like in varchar2 ) ;
+  procedure tab_enable(  p_set_name        in varchar2,
+                         p_tab_regexp_like in varchar2 ) ;
 
   procedure tab_disable( p_set_key         in integer,
+                         p_tab_regexp_like in varchar2 ) ;
+  procedure tab_disable( p_set_name        in varchar2,
                          p_tab_regexp_like in varchar2 ) ;
 
   -- reinitialise for selected table set
@@ -74,9 +79,9 @@ as
                  p_col_regexp_like in varchar2 := null
                ) ;
 
-  -- start of run domain analysis on backgroud (using DBMS_SCHEDULER)
+  -- start of run procedure on backgroud (using DBMS_SCHEDULER)
   procedure run_job_start( p_set_key in integer ) ;
-  -- stop of run domain analysis on backgroud (using DBMS_SCHEDULER)
+  -- stop of run procedure on backgroud (using DBMS_SCHEDULER)
   procedure run_job_stop(  p_set_key in integer ) ;
 
 end DA_PROC_P ;
@@ -142,17 +147,22 @@ as
           case when f.NULLABLE = 'N' then 'Y' end as COL_MANDATORY,
           h.COLUMN_POSITION as COL_PK,
           f.DATA_TYPE       as COL_DATA_TYPE,
-          case f.DATA_TYPE
+          case regexp_substr( f.DATA_TYPE,'^\w+') -- the first word from DATA_TYPE
             when 'CHAR'      then 'C' -- char
             when 'VARCHAR'   then 'C'
             when 'VARCHAR2'  then 'C'
+            ----
             when 'NUMBER'    then 'N' -- num
             when 'INTEGER'   then 'N'
             when 'FLOAT'     then 'N'
+            ----
             when 'DATE'      then 'D' -- datetime
             when 'TIMESTAMP' then 'D'
+            ----
             when 'BLOB'      then 'B' -- big
             when 'CLOB'      then 'B'
+            when 'LONG'      then 'B'
+            ----
                              else 'x'
           end as COL_DATA_TYPE2,
           --
@@ -304,7 +314,7 @@ as
   end ins_TAB ;
 
 
-  procedure prepare_i( p_name             in varchar2,
+  procedure prepare_i( p_set_name         in varchar2,
                        p_owner            in varchar2 := null,
                        p_mask_tp          in varchar2 := null,
                        p_mask_like        in varchar2 := null,
@@ -338,7 +348,7 @@ as
       INSERTED_DATE )
     values(
       da_set_key_sq.NEXTVAL,
-      p_name,
+      p_set_name,
       g_owner,
       case
         when p_mask_tp is not null
@@ -375,7 +385,7 @@ as
   end prepare_i ;
 
 
-  procedure prepare( p_name             in varchar2,
+  procedure prepare( p_set_name         in varchar2,
                      p_owner            in varchar2 := null,
                      p_mask_like        in varchar2 := null,
                      p_mask_notlike     in varchar2 := null,
@@ -387,7 +397,7 @@ as
   -- prepare() version 1: like expresions
   is
   begin
-    prepare_i( p_name             => p_name,
+    prepare_i( p_set_name         => p_set_name,
                p_owner            => p_owner,
                p_mask_tp          => 'L', -- table name like expressions
                p_mask_like        => p_mask_like,
@@ -399,7 +409,7 @@ as
   end prepare ;
 
 
-  procedure prepare( p_name             in varchar2,
+  procedure prepare( p_set_name         in varchar2,
                      p_owner            in varchar2 := null,
                 ---- p_mask_like        in varchar2 := null,
                 ---- p_mask_notlike     in varchar2 := null,
@@ -411,7 +421,7 @@ as
   -- prepare() version 2: regexp like expresion
   is
   begin
-    prepare_i( p_name             => p_name,
+    prepare_i( p_set_name         => p_set_name,
                p_owner            => p_owner,
                p_mask_tp          => 'R', -- table name regexp like expressions
           ---- p_mask_like        => p_mask_like,
@@ -423,10 +433,22 @@ as
   end prepare ;
 
 
-  function get_SET_KEY return integer
+  function get_SET_KEY( p_set_name in varchar2 := null ) return integer
   is
+    l_set_key  integer ;
   begin
-    return g_set_key ;
+    if p_set_name is null then
+      l_set_key := g_set_key ; -- current SET_KEY (afrer prepare() )
+    else
+      begin
+        select a.SET_KEY into l_set_key
+        from   DA_SET a
+        where  a.SET_NAME = p_set_name ;
+      exception
+        when NO_DATA_FOUND then l_set_key := null ;
+      end ;
+    end if ;
+    return l_set_key ;
   end get_SET_KEY ;
 
 
@@ -457,11 +479,35 @@ as
   end tab_enable ;
 
 
+  procedure tab_enable( p_set_name        in varchar2,
+                        p_tab_regexp_like in varchar2 )
+  is
+    l_set_key  integer ;
+  begin
+    l_set_key := get_SET_KEY( p_set_name ) ;
+    if l_set_key is not null then
+      tab_calc_flag_UPD( l_set_key, p_tab_regexp_like,'Y') ;
+    end if ;
+  end tab_enable ;
+
+
   procedure tab_disable( p_set_key         in integer,
                          p_tab_regexp_like in varchar2 )
   is
   begin
     tab_calc_flag_UPD( p_set_key, p_tab_regexp_like,'N') ;
+  end tab_disable ;
+
+
+  procedure tab_disable( p_set_name        in varchar2,
+                         p_tab_regexp_like in varchar2 )
+  is
+    l_set_key  integer ;
+  begin
+    l_set_key := get_SET_KEY( p_set_name ) ;
+    if l_set_key is not null then
+      tab_calc_flag_UPD( l_set_key, p_tab_regexp_like,'N') ;
+    end if ;
   end tab_disable ;
 
 

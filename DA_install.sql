@@ -4,22 +4,24 @@
 
 spool DA_install.lst
 
-col DATABASE for a30
-col USERNAME for a30
-col CURR_DATE for a20
 -- print current schema
-select
-  upper( sys_context('USERENV','DB_NAME'))||'.'||
-  sys_context('USERENV','DB_DOMAIN') as DATABASE,
-  a.USER_ID                          as USR_ID,
-  a.USERNAME                         as USERNAME,
-  to_char( sysdate,'YYYY-MM-DD HH24:MI:SS') as CURR_DATE
-from
-  USER_USERS a
-/
-
--- drop DA_% tables/sequences if exists
+set feedback off
 set serveroutput on
+begin
+  dbms_output.NEW_LINE() ;
+  dbms_output.PUT_LINE('Sysdate:  '|| to_char( sysdate,'YYYY-MM-DD HH24:MI:SS') ) ;
+  dbms_output.PUT_LINE('Database: '||
+                        upper( sys_context('USERENV','DB_NAME'))||'.'||
+                        sys_context('USERENV','DB_DOMAIN') ) ;
+  dbms_output.PUT_LINE('Username: '|| USER ) ;
+end ;
+/
+col DEFAULT_TABLESPACE for a30 new_value TABSP_NAME
+select a.DEFAULT_TABLESPACE from USER_USERS a
+/
+prompt
+
+-- drop DA_% tables/views/sequences if exists
 declare
   cursor c_dbob is
     select 1 as S1, 0 as S2, 'drop sequence '||a.SEQUENCE_NAME as CMD
@@ -64,13 +66,12 @@ begin
   end loop ;
 end ;
 /
-
-set feedback off
+prompt
 
 -- create tables
 
+-- target tablespace if diferent from the default tablespace
 -- define TABSP_NAME = USERS
-define TABSP_NAME = SYM_DATA
 
 @TAB/da_log_TA.sql
 @TAB/da_set_TA.sql
@@ -80,8 +81,8 @@ define TABSP_NAME = SYM_DATA
 
 -- create indexes
 
+-- target tablespace if diferent from the default tablespace
 -- define TABSP_NAME = USERS
-define TABSP_NAME = SYM_IND
 
 -- @da_log_IN.sql
 @TAB/da_set_IN.sql
